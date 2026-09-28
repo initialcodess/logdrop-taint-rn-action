@@ -1,0 +1,393 @@
+name: "LogDrop Taint (React Native)"
+description: "Taint (data-flow) analysis for React Native JavaScript and TypeScript source. Your source never leaves the runner; only SARIF is produced."
+author: "Initial Code Software Solutions"
+
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  license:
+    description: "Your LogDrop licence key. Keep it in a repository secret. It is verified offline; no data is sent anywhere."
+    required: true
+  path:
+    description: "The directory to scan, relative to the repository root."
+    required: false
+    default: "."
+  repo-root:
+    description: "The root that SARIF paths are relative to. Code Scanning can bind a finding to a file only through a repo-root path."
+    required: false
+    default: ${{ github.workspace }}
+  sarif-file:
+    description: "Path of the SARIF file to write."
+    required: false
+    default: "logdrop-taint.sarif"
+  fail-on:
+    description: "Fail the step when a finding is at or above this level: critical | high | medium | low | never. Default 'never' — the scan is advisory and reports without breaking your build. Opt into a gate when you want one."
+    required: false
+    default: "never"
+  annotations:
+    description: "Show findings as a box above the line in the pull request. Free; no Code Scanning licence needed."
+    required: false
+    default: "true"
+  upload-sarif:
+    description: "Upload the SARIF to Code Scanning. If Code Scanning is off on your repository the step warns and moves on rather than breaking the build."
+    required: false
+    default: "true"
+  include-tests:
+    description: "Scan test code too. Test fixtures are where fake credentials live, so they are skipped by default."
+    required: false
+    default: "false"
+  leaks:
+    description: "Also report memory and resource leaks (CWE-401): an effect that starts a timer or subscription and never cleans it up. OFF by default — a leak degrades an app rather than exposing anything, and a security gate should not go red for one."
+    required: false
+    default: "false"
+  snippets:
+    description: "Include the offending source line in the report. OFF by default, and deliberately so: a SARIF that carries your code is a SARIF that ships your code wherever the report goes. Left off, the report carries only the rule, the file and the line."
+    required: false
+    default: "false"
+  config:
+    description: "Path to a JSON file extending the source/sink model with this project's own entries, so the taint rules follow values through code only you have."
+    required: false
+    default: ""
+  suppressions:
+    description: "Path to a signed suppressions file exported from the panel. Findings it names are marked as suppressed rather than removed, and stop failing the gate. A file that does not verify, or has expired, is refused out loud and everything is reported."
+    required: false
+    default: ""
+  panel-url:
+    description: "The panel address, if reports should be sent to the LogDrop panel. LEFT EMPTY, nothing is sent (the default). The only thing sent is the SARIF, never your source."
+    required: false
+    default: ""
+  bundle-id:
+    description: "The application id (e.g. com.company.app). Required when panel-url is set — the panel merges reports into one app under it."
+    required: false
+    default: ""
+  require-pinned-checksum:
+    description: "Fail when the analyzer version being installed has no checksum inside this action. OFF by default: an older pinned action can still install a newer analyzer, verified against the checksum published beside it — which detects a corrupt download but not a replaced one, and says so. Turn it on to refuse that weaker check instead."
+    required: false
+    default: "false"
+  fail-on-delivery-error:
+    description: "Fail the step when the report could not be sent to the panel. OFF by default: a panel that is down, a licence moved between projects, or a bundle id deleted in the panel are not things the developer who opened this pull request can fix, and blocking them ends with the action being removed from the pipeline. Turn it on if you want delivery guaranteed."
+    required: false
+    default: "false"
+  analyzer-version:
+    description: "Which analyzer version to download. The default is the one tested with this action release — you should not need to change it."
+    required: false
+    default: "v1.0.0"
+
+outputs:
+  sarif-file:
+    description: "Path of the SARIF file that was written."
+    value: ${{ inputs.sarif-file }}
+  findings:
+    description: "How many findings were reported."
+    value: ${{ steps.scan.outputs.findings }}
+  report-id:
+    description: "Identifier of the report the panel stored. Empty when no panel-url was given, or when the send failed."
+    value: ${{ steps.panel.outputs.report-id }}
+
+runs:
+  using: composite
+  steps:
+    # UBUNTU is enough, and that is the point of this analyzer being JavaScript: the
+    # iOS one links against Apple frameworks and needs a macOS runner at ten times the
+    # price. Nothing here needs Xcode, the Android SDK, or your node_modules — only
+    # the source is read.
+    - name: Download the analyzer
+      shell: bash
+      env:
+        VERSION: ${{ inputs.analyzer-version }}
+        REQUIRE_PINNED: ${{ inputs.require-pinned-checksum }}
+      run: |
+        set -euo pipefail
+        # THE INSTALLER IS NOT FETCHED. It ships with this action, so it is whatever
+        # the commit you pinned contains — including the checksum it verifies the
+        # bundle against. Downloading it from a tag would mean the script running on
+        # your machine could change without your pin changing, which makes pinning
+        # decorative. The Android action learned this the expensive way: its URL
+        # interpolated the CUSTOMER'S branch name and 404'd on every branch but main.
+        installer="$GITHUB_ACTION_PATH/examples/install-logdrop-taint.sh"
+        if [ ! -f "$installer" ]; then
+          echo "::error title=LogDrop action is incomplete::$installer is missing; the action was not checked out whole."
+          exit 1
+        fi
+        LOGDROP_VERSION="$VERSION" LOGDROP_DIR="$RUNNER_TEMP/logdrop" \
+          LOGDROP_REQUIRE_PINNED_CHECKSUM="$REQUIRE_PINNED" bash "$installer"
+
+    - name: Scan
+      id: scan
+      shell: bash
+      env:
+        LOGDROP_LICENSE: ${{ inputs.license }}
+        SCAN_PATH: ${{ inputs.path }}
+        REPO_ROOT: ${{ inputs.repo-root }}
+        SARIF_FILE: ${{ inputs.sarif-file }}
+        FAIL_ON: ${{ inputs.fail-on }}
+        ANNOTATE: ${{ inputs.annotations }}
+        INCLUDE_TESTS: ${{ inputs.include-tests }}
+        LEAKS: ${{ inputs.leaks }}
+        SNIPPETS: ${{ inputs.snippets }}
+        CONFIG: ${{ inputs.config }}
+        SUPPRESSIONS: ${{ inputs.suppressions }}
+        VERSION: ${{ inputs.analyzer-version }}
+      run: |
+        set -uo pipefail
+        mjs="$RUNNER_TEMP/logdrop/logdrop-taint-rn-${VERSION}.mjs"
+
+        # The analyzer needs Node 20 or newer. Checked HERE rather than left to fail
+        # inside the bundle, because a runner with an older Node produces a syntax
+        # error from a file the customer did not write and cannot read.
+        major=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
+        if [ "$major" -lt 20 ]; then
+          echo "::error title=LogDrop needs Node 20+::This runner has Node $(node -v 2>/dev/null || echo 'none'). Add actions/setup-node with node-version 20 before this step."
+          exit 3
+        fi
+
+        args=("$SCAN_PATH" --sarif "$SARIF_FILE" --repo-root "$REPO_ROOT" --fail-on "$FAIL_ON")
+        [ "$ANNOTATE" = "true" ] && args+=(--github-annotations)
+        [ "$INCLUDE_TESTS" = "true" ] && args+=(--include-tests)
+        [ -n "$CONFIG" ] && args+=(--config "$CONFIG")
+        [ -n "$SUPPRESSIONS" ] && args+=(--suppressions "$SUPPRESSIONS")
+        # BOTH directions, always. Passing a flag only when it differs from the
+        # analyzer's current default means the other value is a request this action
+        # never actually makes — it works only for as long as that default holds, and
+        # the day it moves the input goes silently dead. An input that cannot be asked
+        # for is not an input. The Android action paid for this lesson twice.
+        if [ "$LEAKS" = "true" ]; then args+=(--leaks); else args+=(--no-leaks); fi
+        if [ "$SNIPPETS" = "true" ]; then args+=(--snippets); else args+=(--no-snippets); fi
+
+        node "$mjs" "${args[@]}"
+        code=$?
+
+        # Read from the SARIF, not scraped from the output: a message people improve
+        # is a message that silently changes shape.
+        findings=$(node -e "
+          const fs=require('fs');
+          try { console.log(JSON.parse(fs.readFileSync(process.argv[1],'utf8')).runs[0].results.length); }
+          catch { console.log(0); }
+        " "$SARIF_FILE" 2>/dev/null || echo 0)
+        echo "findings=$findings" >> "$GITHUB_OUTPUT"
+
+        {
+          echo "## LogDrop Taint (React Native)"
+          echo ""
+          if [ "$findings" -eq 0 ]; then
+            echo "No findings."
+          else
+            echo "| Rule | File | Line |"
+            echo "|---|---|---|"
+            node -e "
+              const fs=require('fs');
+              for (const r of JSON.parse(fs.readFileSync(process.argv[1],'utf8')).runs[0].results) {
+                const p = r.locations[0].physicalLocation;
+                console.log('| ' + r.ruleId + ' | ' + p.artifactLocation.uri + ' | ' + p.region.startLine + ' |');
+              }
+            " "$SARIF_FILE"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        # Exit codes pass through unchanged: 1 findings at or above --fail-on,
+        # 2 licence, 3 bad arguments, 4 the scan could not complete. Collapsing them
+        # would tell a developer whose licence lapsed that their code has a
+        # vulnerability.
+        exit $code
+
+    - name: Upload to Code Scanning
+      if: ${{ inputs.upload-sarif == 'true' && always() }}
+      continue-on-error: true
+      # PINNED TO A COMMIT, not @v3. This runs inside the customer's CI with their
+      # source checked out; a moving tag means its owner decides what executes there,
+      # whenever they like. GitHub's own action, so the risk is low — but "low" is a
+      # judgement about the owner, and a pin does not require one.
+      # Resolve a newer one with:
+      #   gh api repos/github/codeql-action/commits/v3 --jq .sha
+      # NOT git/ref/tags/v3, which returns the tag object and will not resolve here.
+      uses: github/codeql-action/upload-sarif@faaca9a8f6edddba5725ffe5adefdab6669a2eca
+      with:
+        sarif_file: ${{ inputs.sarif-file }}
+
+    # The POST is written out here rather than fetched. It used to download
+    # examples/report-to-panel.sh from that repository at ${VERSION} — and VERSION was
+    # `github.ref_name`, the CUSTOMER'S branch. On `main` that happened to resolve
+    # because this repository also has a `main`; on any other branch, and on every
+    # release tag, the URL 404s, `curl -fsSL` fails, and the customer's build goes red
+    # for a reason that has nothing to do with their code. Reporting to the panel must
+    # never do that, which the script itself says in its own header.
+    #
+    # The script stays where it is: it is what the CircleCI, GitLab, Jenkins, Bitrise
+    # and Gradle recipes run, and it is the twin of the iOS copy. Only the GitHub path
+    # stopped fetching it, which is also what the iOS action does.
+    #
+    # NOTHING HERE BREAKS THE BUILD BY DEFAULT, and that is a decision with a reason.
+    # The earlier split — a rejected report failed the build, an unreachable panel did
+    # not — rested on "a 400 is your own fault". It is not always: a bundle id deleted
+    # or renamed in the panel, or a licence moved to another project, answers 400 too,
+    # and the developer whose pull request goes red cannot fix any of them. The action
+    # cannot tell those apart from a typo. The two ways to be wrong do not cost the
+    # same — a build blocked for a reason the team cannot fix ends with the action
+    # removed from the pipeline, while a report that did not arrive is bad but blocks
+    # nobody and is answered with visibility. So delivery is advisory, loudly, and
+    # `fail-on-delivery-error` is there for anyone who wants the hard gate.
+    - name: Send the report to the panel
+      id: panel
+      if: ${{ always() && inputs.panel-url != '' }}
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        PANEL_URL: ${{ inputs.panel-url }}
+        BUNDLE_ID: ${{ inputs.bundle-id }}
+        LICENSE: ${{ inputs.license }}
+        SARIF_FILE: ${{ inputs.sarif-file }}
+        APP_NAME: ${{ github.event.repository.name }}
+        COMMIT: ${{ github.sha }}
+        REF_NAME: ${{ github.ref_name }}
+        FAIL_ON_DELIVERY: ${{ inputs.fail-on-delivery-error }}
+      run: |
+        set -uo pipefail
+
+        # Set when the report did not reach the panel, whatever the cause. One flag
+        # rather than a per-code policy: "did your report arrive" is the question a
+        # team can act on, and a rule that needs a table to explain gets misread.
+        failed=""
+        reason=""
+
+        if [ -z "$BUNDLE_ID" ]; then
+          failed=1
+          reason="panel-url was given but bundle-id was not. The panel uses bundle-id to decide which application a report belongs to."
+        elif [ ! -f "$SARIF_FILE" ]; then
+          failed=1
+          reason="No report at '$SARIF_FILE' — the scan wrote nothing to send."
+        else
+          url="${PANEL_URL%/}/api/reports/sarif"
+          body="$RUNNER_TEMP/panel-response.txt"
+          : > "$body"
+
+          # `|| code=000` IS LOAD-BEARING, and not the same as `|| echo 000`.
+          #
+          # GitHub runs `shell: bash` as `bash --noprofile --norc -e -o pipefail`. The
+          # `set -uo pipefail` above adds u and pipefail; it does NOT clear `-e`. Under
+          # `-e` an assignment from a command substitution carries the command's exit
+          # status, so when curl cannot connect (exit 7) THE STEP DIES ON THIS LINE:
+          # `000` is never assigned, the `000)` branch never runs, the
+          # fail-on-delivery-error gate is skipped entirely, and the build fails with
+          # curl's code — breaking the one promise this step exists to keep, in the most
+          # likely failure there is. A command that is part of a `||` list is exempt from
+          # `-e`, which is what makes the fix work.
+          #
+          # It must be `|| code=000`, NOT `|| echo 000`. curl's -w already prints "000"
+          # when it cannot connect; appending another to stdout yields "000000", which
+          # matches no branch below and falls through to the catch-all. Assigning the
+          # variable replaces that output instead of adding to it. Both spellings look
+          # equivalent and only one is.
+          code=$(curl -sS -o "$body" -w '%{http_code}' -X POST "$url" \
+            -H "Authorization: Bearer $LICENSE" \
+            -F "sarif=@$SARIF_FILE" \
+            -F "bundle_id=$BUNDLE_ID" \
+            -F "app_name=$APP_NAME" \
+            -F "version=$REF_NAME" \
+            -F "commit=$COMMIT") || code=000
+          # Same trap as the curl line, and it bit immediately: when curl never
+          # connected there is no response file, `head` fails, and `-e` kills the step
+          # before the 000 branch can run.
+          #
+          # TWO LAYERS, AND NEITHER IS LOAD-BEARING ALONE. Measured: delete `: > "$body"`
+          # and everything still passes; delete this `|| detail=""` and everything still
+          # passes; delete BOTH and the unreachable-panel check goes red. So whoever
+          # reads one of them in isolation will correctly find it redundant and can
+          # remove it without any check objecting — and the day the other one goes too,
+          # the step is silently back to dying on an unreachable panel.
+          #
+          # They are kept because they fail differently. `: >` answers "the file is
+          # missing"; the guard answers "the read did not work", whatever the reason,
+          # and does not depend on a line thirty lines above staying where it is.
+          detail=$(head -c 300 "$body" 2>/dev/null) || detail=""
+
+          case "$code" in
+            200|201)
+              # The id the panel filed the report under. Printing "sent" and nothing else
+              # leaves no way to reach the report — a customer cannot search the tenant's
+              # report list, and we have had to look one up by hand three times.
+              # `sed` rather than `jq` or `python3`: neither is guaranteed on a customer's
+              # runner, and this must not be the line that fails.
+              report_id=$(sed -n 's/.*"report_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$body" | head -1)
+              if [ -n "$report_id" ]; then
+                echo "report-id=$report_id" >> "$GITHUB_OUTPUT"
+                echo "::notice title=LogDrop panel::Report $report_id was stored by the panel."
+                echo "LogDrop panel report: \`$report_id\`" >> "$GITHUB_STEP_SUMMARY"
+              else
+                # Accepted, but we cannot say what was stored. NOT counted as a delivery
+                # failure — the panel said it took the report — but not silent either,
+                # because "sent" with no id reads as success and leaves nothing to open.
+                echo "::warning title=Panel report id missing::The panel accepted the report but returned no id: $detail"
+              fi
+              ;;
+            401)
+              reason="The panel could not read the licence key (401). Check the licence secret — a line break in the value is the usual cause."
+              failed=1
+              ;;
+            403)
+              # 403 carries two causes: expired OR revoked. Saying "renew it" would be
+              # misleading for a revocation, so the panel's own explanation is shown.
+              reason="The panel did not accept the licence (403): $detail — it may be expired or revoked. satis@initialcode.io"
+              failed=1
+              ;;
+            400|422)
+              reason="The panel rejected the report ($code): $detail — check that the bundle id is registered for this project and that the licence covers it. Nothing was stored."
+              failed=1
+              ;;
+            413)
+              reason="The report exceeded the panel's size limit (413). Narrow the scan with 'exclude' in .logdrop.json to drop generated code."
+              failed=1
+              ;;
+            503)
+              reason="The panel is currently unavailable (503). The scan was unaffected; the next run will try again."
+              failed=1
+              ;;
+            000)
+              reason="The panel could not be reached ($PANEL_URL). The scan was unaffected."
+              failed=1
+              ;;
+            *)
+              reason="The panel returned $code: $detail"
+              failed=1
+              ;;
+          esac
+        fi
+
+        if [ -n "$failed" ]; then
+          # report-id stays EMPTY on purpose, and is written explicitly so the intent is
+          # visible: a workflow can gate its own step on it without parsing any log.
+          echo "report-id=" >> "$GITHUB_OUTPUT"
+          echo "::warning title=LogDrop report NOT sent to the panel::$reason"
+
+          # Placed before OUR OWN output, which means before the findings table the scan
+          # step already appended. That is the whole claim, and it is deliberately not
+          # "at the top of the job summary": $GITHUB_STEP_SUMMARY is append-only, any
+          # later step in the customer's workflow adds below us, and a promise about
+          # THEIR ordering is one we cannot keep. The warning above is what actually
+          # puts this at the top — GitHub groups annotations in their own block, so
+          # prominence comes from the channel, not from byte order in a file.
+          #
+          # Rewriting the file is the only way to get ahead of a previous step's text.
+          # If that fails for any reason, append instead: being in the wrong position
+          # is a small loss, losing the warning entirely is not.
+          notice="$RUNNER_TEMP/logdrop-summary.md"
+          {
+            echo "> [!WARNING]"
+            echo "> **LogDrop: the report was NOT sent to the panel.**"
+            echo ">"
+            echo "> $reason"
+            echo ""
+            [ -f "$GITHUB_STEP_SUMMARY" ] && cat "$GITHUB_STEP_SUMMARY"
+          } > "$notice" && mv "$notice" "$GITHUB_STEP_SUMMARY" || {
+            echo "> [!WARNING]" >> "$GITHUB_STEP_SUMMARY"
+            echo "> **LogDrop: the report was NOT sent to the panel.** $reason" >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          if [ "$FAIL_ON_DELIVERY" = "true" ]; then
+            echo "::error title=LogDrop delivery failed::fail-on-delivery-error is on, so this is a build failure."
+            exit 1
+          fi
+        fi
+
+        exit 0
