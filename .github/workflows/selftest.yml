@@ -1,0 +1,103 @@
+name: Self-test
+
+# The action, run against a fixture, on every change to it. Without this the first
+# time anyone finds out the action is broken is in a customer's pipeline — and the
+# analyzer's own CI cannot catch it, because the action lives in a different
+# repository and consumes a published release rather than the source.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  scan:
+    name: The action scans a fixture and reports what it finds
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build a fixture with two known problems
+        run: |
+          mkdir -p fixture/src
+          cat > fixture/src/App.tsx <<'EOF'
+          import Clipboard from '@react-native-clipboard/clipboard';
+          export function Card({ cvv }: { cvv: string }) {
+            return () => Clipboard.setString(cvv);
+          }
+          EOF
+          printf "fetch('http://api.example.com');\n" > fixture/src/net.js
+
+      - name: Run the action
+        id: scan
+        uses: ./
+        with:
+          # No licence secret: the analyzer runs unlicensed in development builds and
+          # says so. This job is about whether the ACTION wires up correctly.
+          license: ""
+          path: fixture
+          repo-root: ${{ github.workspace }}
+          sarif-file: logdrop-taint.sarif
+          # Off, because this repository has no Code Scanning setup and a failed upload
+          # would be noise rather than a signal about the action.
+          upload-sarif: "false"
+
+      - name: The report exists, names its rules, and carries no source
+        run: |
+          test -f "${{ steps.scan.outputs.sarif-file }}" || { echo "no report written"; exit 1; }
+          node -e '
+            const d = JSON.parse(require("fs").readFileSync("logdrop-taint.sarif","utf8"));
+            const run = d.runs[0];
+            if (!run.tool.driver.rules.length) throw new Error("rules[] is empty - the panel counts stats.rules_loaded from it");
+            if (!run.results.length) throw new Error("no findings on a fixture that plants two");
+            for (const r of run.results) {
+              if (!(r.partialFingerprints || {})["logdropTaint/v2"]) throw new Error("a finding with no v2 fingerprint");
+            }
+            // snippets default to off, and that is the product promise, not a preference.
+            if (JSON.stringify(d).includes("\"snippet\"")) throw new Error("source reached the report without snippets: true");
+            console.log("OK:", run.results.length, "findings,", run.tool.driver.rules.length, "rules, no snippets");
+          '
+          test "${{ steps.scan.outputs.findings }}" -gt 0 \
+            || { echo "findings output was '${{ steps.scan.outputs.findings }}'"; exit 1; }
+
+  gate:
+    name: fail-on turns a green build red, and still writes the report
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          mkdir -p fixture/src
+          printf "fetch('http://api.example.com');\nconst k='AKIAIOSFODNN7EXAMPLE';\n" > fixture/src/a.js
+
+      # The default must stay advisory: a scanner that breaks a pipeline on its own
+      # judgement gets removed from the pipeline.
+      - name: Default is advisory
+        uses: ./
+        with:
+          license: ""
+          path: fixture
+          upload-sarif: "false"
+          sarif-file: advisory.sarif
+
+      - name: fail-on low trips the gate
+        id: gated
+        continue-on-error: true
+        uses: ./
+        with:
+          license: ""
+          path: fixture
+          fail-on: low
+          upload-sarif: "false"
+          sarif-file: gated.sarif
+
+      - name: Assert it tripped AND still reported
+        run: |
+          test "${{ steps.gated.outcome }}" = "failure" \
+            || { echo "expected the gate to fail the step, got '${{ steps.gated.outcome }}'"; exit 1; }
+          test -f gated.sarif || { echo "gate tripped but no report - scan-then-exit is broken"; exit 1; }
+          node -e 'const r=JSON.parse(require("fs").readFileSync("gated.sarif","utf8")).runs[0]; if(!r.results.length) throw new Error("gate tripped on an empty report"); console.log("OK: gate tripped,", r.results.length, "findings still reported");'
