@@ -2,13 +2,13 @@
 # Installs the LogDrop React Native taint analyzer: one self-contained JavaScript file
 # that runs on any machine with Node 20 or newer.
 #
-#   LOGDROP_VERSION=v1.0.0 LOGDROP_DIR="$HOME/.logdrop" ./install-logdrop-taint.sh
+#   LOGDROP_VERSION=v1.0.2 LOGDROP_DIR="$HOME/.logdrop" ./install-logdrop-taint.sh
 #
 # Used by the GitHub Action and by the CircleCI, GitLab, Jenkins and Bitrise recipes
 # beside it, so that every CI system installs the analyzer the same way.
 set -euo pipefail
 
-VERSION="${LOGDROP_VERSION:-v1.0.0}"
+VERSION="${LOGDROP_VERSION:-v1.0.2}"
 DIR="${LOGDROP_DIR:-$HOME/.logdrop}"
 REPO="initialcodess/logdrop-taint-rn-action"
 
@@ -37,6 +37,8 @@ mkdir -p "$DIR"
 expected_sha() {
   case "$1" in
     v1.0.0) echo "bfdc7a1bd383bc7eca8b67d806d9fcadf9af45bccff37cda913cae907a7e9679" ;;
+    v1.0.1) echo "8ef559613244db08155cf90ac377b79f76389ae800013dc5aa1c62e00995388f" ;;
+    v1.0.2) echo "70ed01257367d3d18d912ca0696e1cc6ff656911f84b604e6d88180df05fc167" ;;
     *)      echo "" ;;
   esac
 }
