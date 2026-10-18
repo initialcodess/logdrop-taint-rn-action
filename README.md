@@ -93,7 +93,7 @@ rather know loudly.
 | `bundle-id` | — | Required when `panel-url` is set. |
 | `require-pinned-checksum` | `false` | Refuse an analyzer version this action has no checksum for. |
 | `fail-on-delivery-error` | `false` | Fail the build when the report could not be sent. |
-| `analyzer-version` | `v1.0.2` | Which analyzer to download. |
+| `analyzer-version` | `v1.0.3` | Which analyzer to download. |
 
 ## Outputs
 
