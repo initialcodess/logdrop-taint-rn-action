@@ -103,6 +103,20 @@ rather know loudly.
 | `findings` | How many findings were reported. |
 | `report-id` | The id the panel filed the report under. Empty when nothing was sent. |
 
+## Exit codes
+
+| code | meaning |
+|---|---|
+| 0 | clean |
+| 1 | findings at or above `fail-on` |
+| 2 | licence failure |
+| 3 | bad arguments |
+| 4 | the scan could not complete |
+
+They are kept distinct on purpose: a developer whose licence lapsed must never be told
+their code has a vulnerability. A licence that cannot be verified stops the scan with 2 —
+it does not fall back to scanning without one.
+
 ## Requirements
 
 Node 20 or newer on the runner — `ubuntu-latest` has it. The analyzer is one
