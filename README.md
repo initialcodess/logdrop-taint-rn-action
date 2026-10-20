@@ -30,6 +30,17 @@ It also pins the checksum the installer verifies the analyzer against — that t
 lives *inside this action*, not beside the download, precisely so that replacing a
 release is not enough to change what runs on your machine.
 
+`@v1` is maintained and still tracks the latest 1.x — the release flow moves it onto the
+commit that carries the pins, and the release gate fails unless `@v1` and `@vX.Y.Z` name
+the same commit. It asks you to trust us continuously rather than once, which is a
+reasonable thing to choose; it should just be a choice rather than the only option shown.
+
+Find the commit `v1` points to today with:
+
+```bash
+gh api repos/initialcodess/logdrop-taint-rn-action/commits/v1 --jq .sha
+```
+
 ## The scan is advisory
 
 `fail-on` defaults to `never`: findings are reported and the build stays green. This is
