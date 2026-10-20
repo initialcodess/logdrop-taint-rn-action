@@ -73,7 +73,7 @@ inputs:
   analyzer-version:
     description: "Which analyzer version to download. The default is the one tested with this action release — you should not need to change it."
     required: false
-    default: "v1.0.3"
+    default: "v1.0.4"
 
 outputs:
   sarif-file:
