@@ -35,9 +35,12 @@ jobs:
         id: scan
         uses: ./
         with:
-          # No licence secret: the analyzer runs unlicensed in development builds and
-          # says so. This job is about whether the ACTION wires up correctly.
-          license: ""
+          # The published analyzer enforces its licence, so an empty licence exits 2
+          # before scanning anything. This used to pass "" on the theory that the
+          # analyzer runs unlicensed; that stopped being true when enforcement shipped,
+          # and the self-test had been red ever since. LOGDROP_LICENSE is a CRM-issued
+          # licence (panel: Analyzer Licenses).
+          license: ${{ secrets.LOGDROP_LICENSE }}
           path: fixture
           repo-root: ${{ github.workspace }}
           sarif-file: logdrop-taint.sarif
@@ -79,7 +82,7 @@ jobs:
       - name: Default is advisory
         uses: ./
         with:
-          license: ""
+          license: ${{ secrets.LOGDROP_LICENSE }}
           path: fixture
           upload-sarif: "false"
           sarif-file: advisory.sarif
@@ -89,7 +92,7 @@ jobs:
         continue-on-error: true
         uses: ./
         with:
-          license: ""
+          license: ${{ secrets.LOGDROP_LICENSE }}
           path: fixture
           fail-on: low
           upload-sarif: "false"
